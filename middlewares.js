@@ -4,9 +4,7 @@ const Account = require("./models/Account")
 const Session = require("./models/Session")
 const Transaction = require("./models/Transaction")
 const fetch = require("node-fetch")
-const jose = require('node-jose')
-const fs = require('fs')
-//const {sendRequest} = require("./middlewares");
+const {createSignedTransaction} = require('./crypto')
 
 exports.verifyToken = async (req, res, next) => {
 
@@ -95,19 +93,6 @@ async function setStatus(transaction, status, statusDetail) {
     await transaction.save()
 }
 
-async function createSignedTransaction(input) {
-
-    let privateKey
-    try {
-        privateKey = fs.readFileSync('private.key', 'utf8')
-        const keystore = jose.JWK.createKeyStore();
-        const key = await keystore.add(privateKey, 'pem')
-        return await jose.JWS.createSign({format: 'compact'}, key).update(JSON.stringify(input), "utf8").final()
-    } catch (err) {
-        console.error('Error reading private key' + err)
-        throw Error('Error reading private key' + err)
-    }
-}
 
 async function sendRequestToBank(destinationBank, transactionAsJwt) {
 
@@ -122,6 +107,7 @@ exports.sendPostRequest = async (url, data) => {
 exports.sendGetRequest = async (url) => {
     return await exports.sendRequest('get', url, null)
 }
+
 
 exports.sendRequest = async (method, url, data) => {
     let responseText = '';
@@ -144,7 +130,7 @@ exports.sendRequest = async (method, url, data) => {
         return JSON.parse(responseText);
 
     } catch (e) {
-        throw new Error('sendRequest('+url+'): ' + e.message +  (typeof responseText === 'undefined' ? '': '|' + responseText))
+        throw new Error('sendRequest(' + url + '): ' + e.message + (typeof responseText === 'undefined' ? '' : '|' + responseText))
     }
 }
 
@@ -202,6 +188,7 @@ exports.processTransactions = async function () {
         }
 
         try {
+
             const response = await sendRequestToBank(destinationBank, await createSignedTransaction({
                 accountFrom: transaction.accountFrom,
                 accountTo: transaction.accountTo,
@@ -213,13 +200,11 @@ exports.processTransactions = async function () {
 
             if (typeof response.error !== 'undefined') {
                 return await setStatus(transaction, 'Failed', response.error)
-
             }
 
             transaction.receiverName = response.receiverName
             console.log('Completed transaction ' + transaction._id)
             return await setStatus(transaction, 'Completed', '')
-
 
         } catch (e) {
             console.log(e)
@@ -228,7 +213,6 @@ exports.processTransactions = async function () {
             console.log('- Error is: ' + e.message)
 
             return await setStatus(transaction, 'Pending', e.message)
-
         }
 
     }, Error)

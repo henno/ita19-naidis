@@ -8,6 +8,9 @@ const {verifyToken, refreshListOfBanksFromCentralBank, sendGetRequest} = require
 const jose = require("node-jose");
 const fs = require("fs");
 const axios = require("axios");
+const {JWK} = require("node-jose");
+const {join} = require("path");
+const {verifySignature, getPublicKey} = require("../crypto");
 
 
 function debitAccount(accountFrom, amount) {
@@ -107,26 +110,31 @@ router.post('/', verifyToken, async function (req, res) {
 
 router.get('/jwks', async function (req, res) {
 
-    // Create new keystore
-    const keystore = jose.JWK.createKeyStore();
-
     // Add our private key from file to the keystore
-    await keystore.add(fs.readFileSync('./private.key').toString(), 'pem')
+    console.log('/jwks: Reading keystore from json file into memory')
+    const keystoreAsJsonString = fs.readFileSync(join('.cert', 'keystore.json')).toString();
+    const keystore = await JWK.asKeyStore(keystoreAsJsonString)
 
     // Return our keystore (only the public key derived from the imported private key) in JWKS (JSON Web Key Set) format
-    console.log('/jwks: Exporting keystore and returning it')
+    console.log('/jwks: Returning keystore without private key')
     return res.send(keystore.toJSON())
 
 })
+
+async function convertCurrency(payload, accountTo) {
+    let amount = payload.amount
+    if (accountTo.currency !== payload.currency) {
+        const rate = await getRates(payload.currency, accountTo.currency)
+        amount = parseInt((parseInt(amount) * parseFloat(rate)).toFixed(0))
+    }
+    return amount;
+}
 
 router.post('/b2b', async function (req, res) {
 
     try {
         const components = req.body.jwt.split('.')
-
         const payload = JSON.parse(base64url.decode(components[1]))
-
-
         const accountTo = await Account.findOne({number: payload.accountTo})
 
         if (!accountTo) {
@@ -134,8 +142,8 @@ router.post('/b2b', async function (req, res) {
         }
 
         const accountFromBankPrefix = payload.accountFrom.substring(0, 3)
-
         const accountFromBank = await Bank.findOne({bankPrefix: accountFromBankPrefix})
+
         if (!accountFromBank) {
             const result = await refreshListOfBanksFromCentralBank();
             if (typeof result.error !== 'undefined') {
@@ -148,25 +156,19 @@ router.post('/b2b', async function (req, res) {
             }
         }
 
-
         // Validate signature
-        //
-        // const jwks = await sendGetRequest(accountFromBank.jwksUrl)
-        //
-        // const keystore = jose.JWK.asKeyStore(jwks)
-        // try {
-        //     await jose.JWKS.createVerify(keystore).verify(req.body.jwt)
-        // } catch (e) {
-        //     return res.status(400).send({error: 'Invalid signature'})
-        // }
 
-        let amount = payload.amount
-        if (accountTo.currency !== payload.currency) {
-            const rate = await getRates(payload.currency, accountTo.currency)
-            amount = parseInt((parseInt(amount) * parseFloat(rate)).toFixed(0))
+        try {
+            const publicKey = await getPublicKey(accountFromBank.jwksUrl)
+            await verifySignature(req.body.jwt, publicKey);
+        } catch (e) {
+            return res.status(400).send({error: 'Signature verification failed: ' + e.message})
         }
 
+        let amount = await convertCurrency(payload, accountTo);
+
         const accountToOwner = await User.findOne({_id: accountTo.userId})
+
         accountTo.balance += amount
         await accountTo.save();
 
